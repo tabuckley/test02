@@ -1,281 +1,232 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Scrub ↔ Page Sync (with Intro)</title>
+  <title>Smooth Scrub Player</title>
   <link rel="stylesheet" href="main.css" />
   <style>
-    html,body{overflow:hidden;margin:0;padding:0;background:#000}
-    /* keep bars interactive and above video */
-    #scrubber, #scrubber2{ pointer-events:auto!important; z-index:10000!important; cursor:ew-resize; touch-action:none; }
-    /* overlay should block clicks while visible; when hidden allow events through */
-    #screensaver.is-visible{ pointer-events:auto; }
-    #screensaver:not(.is-visible){ pointer-events:none; }
+    html, body { margin:0; padding:0; background:#000; overflow:hidden; }
+    video#v0 { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; }
 
-    /* === Longer bars (width only) === */
-    /* Increase preferred width and allow a larger cap (good for iPad landscape) */
+    /* Scrub bars */
     :root { --bar-min: 520px; --bar-vw: 96vw; --bar-max: 1360px; }
-
     #scrubber, #scrubber2 {
-      width: clamp(var(--bar-min), var(--bar-vw), var(--bar-max)) !important;
-      background: transparent !important; /* keep the track minimal unless overridden */
-      box-shadow: none !important;
+      position: fixed; left: 50%; transform: translateX(-50%);
+      width: clamp(var(--bar-min), var(--bar-vw), var(--bar-max));
+      pointer-events:auto; z-index:10000; touch-action:none; cursor:ew-resize;
+      background: transparent; box-shadow: none;
+      height: 22px; /* height can be tuned or left to main.css */
     }
+    #scrubber  { bottom: 48px; }   /* coarse (invisible track) */
+    #scrubber2 { bottom: 16px; }   /* fine (visible red fill)   */
 
-    /* Hide hint/fill only for the big invisible coarse bar */
-    #scrubber .scrubber__fill,
-    #scrubber .scrubber__hint { display: none !important; }
-
-    /* === Make the fine/frame-control bar visibly RED === */
-    /* Show the fill and color it red; keep hint hidden */
-    #scrubber2 .scrubber__hint { display: none !important; }
-    #scrubber2 .scrubber__fill {
-      display: block !important;
-      background: #ff2b2b !important;   /* red progress */
-      /* no height set here, so whatever your main.css defines stays the same (not taller) */
+    .scrubber__fill {
+      position:absolute; left:0; top:0; bottom:0;
+      width:0%;
     }
+    .scrubber__hint { display:none; }
+
+    /* Coarse: track only, no visible fill */
+    #scrubber .scrubber__fill { display:none; }
+
+    /* Fine: show red fill */
+    #scrubber2 .scrubber__fill { display:block; background:#ff2b2b; }
   </style>
 </head>
 <body>
-  <!-- MAIN VIDEO -->
+  <!-- Main video -->
   <video id="v0" playsinline muted preload="auto">
     <source src="fingers.mp4" type="video/mp4" />
   </video>
 
-  <!-- Big invisible scrub bar (coarse) -->
-  <div id="scrubber" role="slider" aria-label="fine scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-    <div class="scrubber__fill" aria-hidden="true"></div>
-    <div class="scrubber__hint" aria-hidden="true">scrub</div>
-  </div>
-
-  <!-- Small visible red scrub bar (fine / frame control) -->
-  <div id="scrubber2" role="slider" aria-label="coarse scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+  <!-- Coarse (big, mostly invisible) -->
+  <div id="scrubber" role="slider" aria-label="coarse scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
     <div class="scrubber__fill" aria-hidden="true"></div>
     <div class="scrubber__hint" aria-hidden="true">coarse</div>
   </div>
 
-  <!-- SCREEN SAVER / INTRO OVERLAY (VISIBLE ON LOAD) -->
-  <div id="screensaver" class="is-visible" aria-hidden="false">
-    <video id="ssv1" playsinline muted preload="auto" autoplay loop>
-      <source src="screensaver.mp4" type="video/mp4" />
-    </video>
-    <video id="ssv2" playsinline muted preload="auto">
-      <source src="intro.mp4" type="video/mp4" />
-    </video>
+  <!-- Fine (visible red) -->
+  <div id="scrubber2" role="slider" aria-label="fine scrub" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div class="scrubber__fill" aria-hidden="true"></div>
+    <div class="scrubber__hint" aria-hidden="true">fine</div>
   </div>
 
   <script>
-    /************** Config **************/
-    const PLAY_START = 0;
-    const PLAY_END   = null;   // null = full duration
-    const SNAP_TO_FRAMES = false;
-    const FPS = 30;
-
-    // === Minimal smoothing knob (new) ===
-    const USE_SMOOTHING = true;   // turn off to revert to your original instant seeks
-    const SMOOTH_TAU_MS = 140;    // lower = snappier, higher = smoother
-
-    // throttle messages to Wix (ms)
-    const SEND_INTERVAL_MS = 50; // ~20 msgs/sec
-
-    // screensaver accel
-    const SCREENSAVER_ACCEL = 6.0;
-
     /************** Elements **************/
     const vid = document.getElementById('v0');
-    const barFine   = document.getElementById('scrubber');
-    const barCoarse = document.getElementById('scrubber2');
-    const fillFine   = barFine.querySelector('.scrubber__fill');
+    const barCoarse = document.getElementById('scrubber');
+    const barFine   = document.getElementById('scrubber2');
     const fillCoarse = barCoarse.querySelector('.scrubber__fill');
+    const fillFine   = barFine.querySelector('.scrubber__fill');
 
-    const overlay = document.getElementById('screensaver');
-    const v1 = document.getElementById('ssv1'); // screensaver loop
-    const v2 = document.getElementById('ssv2'); // intro
+    /************** Tuning **************/
+    const SNAP_TO_FRAMES = false;  // keep false for smoothest feel
+    const FPS = 30;                // used only if you turn snapping on
 
-    /************** State **************/
-    let playStart = PLAY_START;
-    let playEnd   = PLAY_END;     // becomes duration after metadata
+    // Throttle messages we send back to parent
+    const SEND_INTERVAL_MS = 60;   // ~16–20 messages/sec
     let lastSentAt = 0;
-    let allowSync = false;        // parent can react to scrubValue only after intro
-    let applyingFromParent = false; // prevent echo on parent→child updates
 
+    // Play window (optional): use whole duration by default
+    let PLAY_START = 0;
+    let PLAY_END   = null; // null -> full duration
+
+    /************** Utils **************/
     const clamp01 = v => Math.max(0, Math.min(1, Number(v)||0));
-
-    /************** Minimal smoother (add-only) **************/
-    const __smooth = { target: 0, display: 0, last: 0, raf: 0 };
-    function smoothSeek(t){
-      if (!USE_SMOOTHING) { vid.currentTime = t; return; }
-      __smooth.target = t;
-      if (!__smooth.raf) {
-        __smooth.display = vid.currentTime || 0;
-        __smooth.last = performance.now();
-        const step = (now)=>{
-          const dt = Math.max(0, now - __smooth.last); __smooth.last = now;
-          const alpha = 1 - Math.exp(-dt / SMOOTH_TAU_MS);
-          __smooth.display += ( __smooth.target - __smooth.display ) * alpha;
-          let tApply = SNAP_TO_FRAMES && FPS>0 ? Math.round(__smooth.display*FPS)/FPS : __smooth.display;
-          if (Math.abs((vid.currentTime||0) - tApply) > (SNAP_TO_FRAMES? (0.45/FPS) : 0.01)) {
-            try { if (typeof vid.fastSeek === 'function') vid.fastSeek(tApply); else vid.currentTime = tApply; }
-            catch(_) { vid.currentTime = tApply; }
-          }
-          __smooth.raf = requestAnimationFrame(step);
-        };
-        __smooth.raf = requestAnimationFrame(step);
-      }
+    function ratioFromClientX(root, x) {
+      const rect = root.getBoundingClientRect();
+      const dx = Math.min(Math.max(0, x - rect.left), rect.width);
+      return rect.width ? (dx / rect.width) : 0;
     }
-
-    /************** Messaging helpers **************/
-    function sendToParent(obj){
-      try { parent.postMessage(JSON.stringify(obj), '*'); }
-      catch(_) { try { parent.postMessage(obj, '*'); } catch(_) {} }
+    function inside(root, x, y) {
+      const r = root.getBoundingClientRect();
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
     }
-    function parseMsg(d){ if (typeof d === 'string') { try { return JSON.parse(d); } catch { return {}; } } return d || {}; }
-
-    /************** Core mapping **************/
-    function ratioToTime(r){
+    function ratioToTime(r) {
       if (!isFinite(vid.duration) || vid.duration <= 0) return 0;
-      const start = Math.max(0, Math.min(playStart, vid.duration));
-      const end   = (playEnd == null) ? vid.duration : Math.min(playEnd, vid.duration);
+      const start = Math.max(0, Math.min(PLAY_START, vid.duration));
+      const end   = (PLAY_END == null) ? vid.duration : Math.min(PLAY_END, vid.duration);
       const span  = Math.max(0, end - start);
       let t = start + clamp01(r) * span;
-      if (SNAP_TO_FRAMES && FPS > 0) t = Math.round(t * FPS) / FPS;
+      if (SNAP_TO_FRAMES && FPS>0) t = Math.round(t * FPS) / FPS;
       return t;
     }
+    function timeToRatio(t) {
+      if (!isFinite(vid.duration) || vid.duration <= 0) return 0;
+      const start = Math.max(0, Math.min(PLAY_START, vid.duration));
+      const end   = (PLAY_END == null) ? vid.duration : Math.min(PLAY_END, vid.duration);
+      const span  = Math.max(1e-6, end - start);
+      return clamp01((t - start) / span);
+    }
 
-    function setByRatio(r, {fromParent=false} = {}){
+    /************** Critically-damped spring smoother **************/
+    const Smooth = { target: 0, x: 0, v: 0, raf: 0, last: 0 };
+    const OMEGA = 10.0;       // 8–12 recommended
+    const MAX_STEP = 0.080;   // max jump per frame (sec)
+    const APPLY_EPS = 0.010;  // minimum difference before applying (sec)
+
+    function smoothSeek(t) {
+      Smooth.target = t;
+      if (!Smooth.raf) {
+        Smooth.x = (vid.currentTime || 0);
+        Smooth.v = 0;
+        Smooth.last = performance.now();
+        Smooth.raf = requestAnimationFrame(springLoop);
+      }
+    }
+    function springLoop(now) {
+      const dt = Math.min(0.050, Math.max(0.001, (now - Smooth.last) * 0.001));
+      Smooth.last = now;
+
+      const x = Smooth.x, v = Smooth.v, xT = Smooth.target, w = OMEGA;
+      const f = w*w*(xT - x) - 2*w*v;   // critical damping
+      const vNew = v + f * dt;
+      let  xNew = x + vNew * dt;
+
+      if (Math.abs(xNew - x) > MAX_STEP) {
+        xNew = x + Math.sign(xNew - x) * MAX_STEP;
+      }
+
+      Smooth.x = xNew;
+      Smooth.v = vNew;
+
+      if (vid.duration && Math.abs((vid.currentTime||0) - xNew) > APPLY_EPS) {
+        if (typeof vid.fastSeek === 'function') {
+          try { vid.fastSeek(xNew); } catch(_) { vid.currentTime = xNew; }
+        } else {
+          vid.currentTime = xNew;
+        }
+      }
+
+      Smooth.raf = requestAnimationFrame(springLoop);
+    }
+
+    /************** Core set-by-ratio **************/
+    function setByRatio(r, { fromParent = false } = {}) {
       if (!isFinite(vid.duration) || vid.duration <= 0) return;
 
-      // ▼ CHANGED: use smoother instead of instant seek
       const t = ratioToTime(r);
       smoothSeek(t);
 
-      // p = 0..1 progress within active window
-      const endForP = (playEnd==null ? (vid.duration||1) : playEnd);
-      const p = clamp01((t - (playStart || 0)) / ((endForP) - (playStart||0) || 1));
-
-      // Update fills
-      if (fillFine)   fillFine.style.width   = (p*100).toFixed(3) + '%';
+      // update fills
+      const p = timeToRatio(t);
       if (fillCoarse) fillCoarse.style.width = (p*100).toFixed(3) + '%';
-      barFine.setAttribute('aria-valuenow',   Math.round(p*100));
+      if (fillFine)   fillFine.style.width   = (p*100).toFixed(3) + '%';
       barCoarse.setAttribute('aria-valuenow', Math.round(p*100));
+      barFine.setAttribute('aria-valuenow',   Math.round(p*100));
 
-      // Send to Wix (only after intro), and not if this came from Wix
-      if (!fromParent && allowSync) {
+      // send progress back to parent (raw progress 0..1), throttled
+      if (!fromParent) {
         const now = performance.now();
         if (now - lastSentAt >= SEND_INTERVAL_MS) {
           lastSentAt = now;
-          sendToParent({ type:'scrubValue', value:p }); // 0..1 precise
+          try {
+            parent.postMessage({ type:'scrubValue', value: p }, '*');
+          } catch(_) {
+            try { parent.postMessage(JSON.stringify({ type:'scrubValue', value:p }), '*'); } catch(__) {}
+          }
         }
       }
     }
 
-    /************** Hover/drag wiring (no click required) **************/
-    function ratioFromClientX(root, x){ const rect = root.getBoundingClientRect(); const dx = Math.min(Math.max(0, x - rect.left), rect.width); return rect.width ? (dx / rect.width) : 0; }
-    function inside(root, x, y){ const r = root.getBoundingClientRect(); return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }
-
-    [barFine, barCoarse].forEach(root=>{
+    /************** Pointer/hover wiring **************/
+    [barCoarse, barFine].forEach(root => {
       root.addEventListener('pointerenter', e => setByRatio(ratioFromClientX(root, e.clientX)));
       root.addEventListener('mouseenter',   e => setByRatio(ratioFromClientX(root, e.clientX)));
     });
 
-    function onMove(e){
-      const { clientX:x, clientY:y } = e;
-      if (inside(barFine, x, y))   { setByRatio(ratioFromClientX(barFine,   x)); return; }
+    function onMove(e) {
+      const x = e.clientX, y = e.clientY;
       if (inside(barCoarse, x, y)) { setByRatio(ratioFromClientX(barCoarse, x)); return; }
+      if (inside(barFine,   x, y)) { setByRatio(ratioFromClientX(barFine,   x)); return; }
     }
-    addEventListener('mousemove', onMove, { passive:true });
-    addEventListener('pointermove', onMove, { passive:true });
+    addEventListener('mousemove',    onMove, { passive:true });
+    addEventListener('pointermove',  onMove, { passive:true });
 
-    [barFine, barCoarse].forEach(root=>{
+    [barCoarse, barFine].forEach(root => {
       let dragging = false;
-      root.addEventListener('pointerdown', e=>{ dragging=true; root.setPointerCapture?.(e.pointerId); setByRatio(ratioFromClientX(root, e.clientX)); });
-      root.addEventListener('pointermove', e=>{ if(dragging) setByRatio(ratioFromClientX(root, e.clientX)); });
-      root.addEventListener('pointerup',   ()=> dragging=false);
-      root.addEventListener('pointercancel',()=> dragging=false);
+      root.addEventListener('pointerdown', e => {
+        dragging = true; root.setPointerCapture?.(e.pointerId);
+        setByRatio(ratioFromClientX(root, e.clientX));
+      });
+      root.addEventListener('pointermove', e => { if (dragging) setByRatio(ratioFromClientX(root, e.clientX)); });
+      const end = () => dragging = false;
+      root.addEventListener('pointerup', end);
+      root.addEventListener('pointercancel', end);
     });
 
-    /************** Metadata: set window **************/
-    vid.addEventListener('loadedmetadata', ()=>{
-      const dur = isFinite(vid.duration) ? vid.duration : 0;
-      if (dur > 0) {
-        playStart = Math.max(0, Math.min(PLAY_START, dur));
-        playEnd   = (PLAY_END == null) ? dur : Math.max(playStart, Math.min(PLAY_END, dur));
-      }
-      setByRatio( (vid.currentTime && dur) ? (vid.currentTime / dur) : 0 );
-    });
-
-    /************** Keep fills aligned if video changes otherwise **************/
-    function updateFillsFromVideo(){
+    /************** Keep fills aligned on native updates **************/
+    function syncFillsFromVideo() {
       if (!vid.duration) return;
-      const p = clamp01( vid.currentTime / (vid.duration || 1) );
-      if (fillFine)   fillFine.style.width   = (p*100).toFixed(3)+'%';
-      if (fillCoarse) fillCoarse.style.width = (p*100).toFixed(3)+'%';
-      barFine.setAttribute('aria-valuenow', Math.round(p*100));
+      const p = timeToRatio(vid.currentTime || 0);
+      if (fillCoarse) fillCoarse.style.width = (p*100).toFixed(3) + '%';
+      if (fillFine)   fillFine.style.width   = (p*100).toFixed(3) + '%';
       barCoarse.setAttribute('aria-valuenow', Math.round(p*100));
+      barFine.setAttribute('aria-valuenow',   Math.round(p*100));
     }
-    ['timeupdate','seeking','seeked','play','pause'].forEach(ev=>{
-      vid.addEventListener(ev, updateFillsFromVideo);
+    ['timeupdate','seeking','seeked','play','pause','loadedmetadata'].forEach(ev => {
+      vid.addEventListener(ev, syncFillsFromVideo);
     });
 
-    /************** Parent → Child: receive page scroll as 0..1 **************/
+    /************** Parent → Child messages **************/
     addEventListener('message', (evt) => {
-      const msg = parseMsg(evt.data);
-      if (msg.type === 'scrollValue') {
-        const p = clamp01(Number(msg.value) || 0);
-        applyingFromParent = true;
-        setByRatio(p, {fromParent:true});
-        setTimeout(()=>{ applyingFromParent = false; }, SEND_INTERVAL_MS);
+      const d = typeof evt.data === 'string' ? (()=>{ try{return JSON.parse(evt.data);}catch(_){return {};}})() : (evt.data||{});
+      if (d.type === 'scrollValue' || d.type === 'scrubValueSmoothed') {
+        const p = clamp01(d.value);
+        setByRatio(p, { fromParent: true });
       }
     });
 
-    /************** Overlay / Intro logic (VISIBLE) **************/
-    let accelerating = false;
-
-    function showOverlay(){
-      overlay.classList.add('is-visible');
-      overlay.setAttribute('aria-hidden','false');
-      overlay.classList.remove('mode-intro');
-      try { v2.pause(); v2.currentTime = 0; } catch(_) {}
-      try { v1.pause(); } catch(_) {}
-      v1.playbackRate = 1;
-      v1.loop = true;
-      try { v1.play().catch(()=>{}); } catch(_) {}
-
-      allowSync = false; // parent should ignore scrub until intro done
-      sendToParent({ type: 'lockScroll', value: true });
-    }
-    function hideOverlay(){
-      overlay.classList.remove('is-visible');
-      overlay.setAttribute('aria-hidden','true');
-      overlay.classList.remove('mode-intro');
-      try { v1.pause(); } catch(_) {}
-      try { v2.pause(); } catch(_) {}
-      allowSync = true;
-      sendToParent({ type: 'lockScroll', value: false });
-    }
-    function accelerateAndFinish(){
-      if (!overlay.classList.contains('is-visible')) return;
-      if (accelerating) return;
-      accelerating = true;
-      v1.loop = false;
-      v1.playbackRate = SCREENSAVER_ACCEL;
-      try { v1.play().catch(()=>{}); } catch(_) {}
-    }
-
-    v1.addEventListener('ended', ()=>{
-      if (!overlay.classList.contains('is-visible')) return;
-      overlay.classList.add('mode-intro');
-      try { v2.play().catch(()=>{}); } catch(_) {}
+    /************** Init **************/
+    vid.muted = true;
+    vid.pause(); // we scrub, we don't autoplay
+    vid.addEventListener('loadedmetadata', () => {
+      // optional: set a custom play window
+      PLAY_START = 0;
+      PLAY_END   = null; // full duration
+      syncFillsFromVideo();
     });
-
-    v2.addEventListener('ended', ()=>{ hideOverlay(); });
-
-    ['pointerdown','click','touchstart','keydown','wheel'].forEach(ev=>{
-      overlay.addEventListener(ev, accelerateAndFinish, { passive:true });
-    });
-
-    showOverlay();
   </script>
 </body>
 </html>
